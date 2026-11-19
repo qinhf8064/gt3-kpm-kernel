@@ -118,24 +118,39 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/kernel"
           # realme open-source tree references oplus private Kconfig files
-          # (e.g. kernel/oplus_cpu/sched/Kconfig) that are not published.
-          # Create empty placeholders for any missing 'source' targets so
-          # gki_defconfig can parse. Iterate until no missing refs remain.
-          for pass in 1 2 3 4 5; do
-            missing=$(grep -rhoE 'source[[:space:]]+"[^"]+"' --include=Kconfig* . 2>/dev/null \
-              | sed -E 's/source[[:space:]]+"([^"]+)"/\1/' | sort -u | while read f; do
-                [ -f "$f" ] || echo "$f"
-              done)
-            [ -z "$missing" ] && break
-            echo "$missing" | while read f; do
-              [ -n "$f" ] && mkdir -p "$(dirname "$f")" && touch "$f" && echo "placeholder: $f"
-            done
-          done
-          echo "=== remaining missing (should be none) ==="
-          grep -rhoE 'source[[:space:]]+"[^"]+"' --include=Kconfig* . 2>/dev/null \
-            | sed -E 's/source[[:space:]]+"([^"]+)"/\1/' | sort -u | while read f; do
-              [ -f "$f" ] || echo "STILL MISSING: $f"
-            done
+          # not published. Create empty placeholders for missing 'source'
+          # targets so gki_defconfig parses. Skip Make-variable refs like
+          # $(SRCARCH). Tolerate existing dirs/files.
+          python3 - <<'PY'
+          import os, re, glob
+          pat = re.compile(r'source\s+"([^"]+)"')
+          created = 0
+          for _ in range(6):
+              missing = set()
+              for kf in glob.glob('**/Kconfig*', recursive=True):
+                  try:
+                      txt = open(kf, encoding='utf-8', errors='ignore').read()
+                  except Exception:
+                      continue
+                  for m in pat.findall(txt):
+                      if '$(' in m or '${' in m:   # skip make variables
+                          continue
+                      if not os.path.isfile(m):
+                          missing.add(m)
+              if not missing:
+                  break
+              for f in sorted(missing):
+                  d = os.path.dirname(f)
+                  if d and not os.path.isdir(d):
+                      os.makedirs(d, exist_ok=True)
+                  try:
+                      open(f, 'a').close()
+                      created += 1
+                      print('placeholder:', f)
+                  except Exception as e:
+                      print('skip', f, e)
+          print('total placeholders created:', created)
+          PY
 
       - name: Build Image
         run: |
