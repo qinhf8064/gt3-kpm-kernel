@@ -62,13 +62,22 @@ jobs:
       - name: Integrate SukiSU Ultra
         run: |
           cd ~/kernel_platform
+          echo "=== kernel_platform layout ==="; ls -la
+          echo "=== find drivers dirs ==="; find . -maxdepth 2 -type d -name drivers 2>/dev/null
+          # setup.sh needs cwd containing drivers/ or common/drivers.
+          # GKI tree is usually common/. Pick the dir that has drivers/.
+          if [ -d common/drivers ]; then ROOT=~/kernel_platform/common;
+          elif [ -d drivers ]; then ROOT=~/kernel_platform;
+          else ROOT=~/kernel_platform/common; fi
+          echo "using ROOT=$ROOT"
+          cd "$ROOT"
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.sukisu_ref }}"
-          if [ -d KernelSU/kernel ]; then
-            cd KernelSU/kernel
+          # version stamp (KernelSU cloned under $ROOT)
+          if [ -d "$ROOT/KernelSU/kernel" ]; then
+            cd "$ROOT/KernelSU/kernel"
             BASE=10606
             V=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 0) + $BASE)
             sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${V}/" Makefile || true
-            cd ~/kernel_platform
           fi
 
       - name: Apply SUSFS patches
