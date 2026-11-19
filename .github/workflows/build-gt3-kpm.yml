@@ -1,0 +1,154 @@
+name: Build realme GT3 Kernel with SukiSU + KPM
+
+# Cloud-build realme GT3 (RMX3708, sm8550) GKI android12-5.10 kernel with
+# SukiSU Ultra + SUSFS + CONFIG_KPM=y, so `ksud kpm load` works on-device.
+#
+# How to use:
+#   1. Create a new GitHub repo (or fork any repo), push this file to
+#      .github/workflows/build-gt3-kpm.yml
+#   2. Actions tab -> "Build realme GT3 Kernel with SukiSU + KPM" -> Run workflow
+#   3. Download the AK3 zip artifact, flash on device (backup boot first!)
+#
+# No local toolchain / source download needed; GitHub runners do the work.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sukisu_ref:
+        description: 'SukiSU commit/tag (empty = latest tag)'
+        required: false
+        default: ''
+      susfs_branch:
+        description: 'susfs4ksu branch'
+        required: false
+        default: 'gki-android12-5.10'
+      make_release:
+        description: 'Create a release with the zip'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      KERNEL_REPO: realme-kernel-opensource/realme_GTneo5_GTneo5-240W_GT3-240W-AndroidB-kernel-source
+      KERNEL_BRANCH: master
+      ARCH: arm64
+      SUBARCH: arm64
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl bc bison flex libssl-dev libelf-dev \
+            python3 make cpio unzip zip rsync ccache binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu libncurses-dev
+
+      - name: Setup clang (AOSP r416183b ~ LLVM12, matches device kernel)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/toolchains/clang-r416183b"
+          cd "$GITHUB_WORKSPACE/toolchains"
+          # Direct tarball of AOSP clang r416183b (LLVM 12.0.5), the exact
+          # toolchain the device kernel was built with (per /proc/version).
+          curl -L --retry 3 -o clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r416183b.tar.gz"
+          tar xzf clang.tar.gz -C clang-r416183b
+          rm clang.tar.gz
+          "$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin/clang" --version | head -1
+          echo "CLANG_DIR=$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin" >> $GITHUB_ENV
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 -b "$KERNEL_BRANCH" \
+            "https://github.com/$KERNEL_REPO" "$GITHUB_WORKSPACE/kernel"
+
+      - name: Integrate SukiSU + enable KPM
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel"
+          # SukiSU official setup (clones SukiSU, symlinks drivers/kernelsu,
+          # patches drivers/Makefile + Kconfig)
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.sukisu_ref }}" || \
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash
+          # Enable KSU + KPM + KALLSYMS in gki_defconfig
+          cat >> arch/arm64/configs/gki_defconfig <<EOF
+          CONFIG_KSU=y
+          CONFIG_KPM=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_MODULES=y
+          EOF
+          echo "=== gki_defconfig tail ==="; tail -8 arch/arm64/configs/gki_defconfig
+
+      - name: Integrate SUSFS
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel"
+          git clone --depth=1 -b "${{ github.event.inputs.susfs_branch }}" \
+            https://gitlab.com/simonpunk/susfs4ksu susfs || \
+          git clone --depth=1 https://github.com/sidex15/susfs4ksu susfs
+          # apply susfs kernel patches for android12-5.10
+          if [ -d susfs/kernel_patches ]; then
+            for p in susfs/kernel_patches/*.patch; do
+              [ -f "$p" ] && patch -p1 < "$p" || true
+            done
+            cp susfs/kernel_patches/fs/susfs.c fs/susfs.c 2>/dev/null || true
+            cp susfs/kernel_patches/include/linux/susfs.h include/linux/susfs.h 2>/dev/null || true
+          fi
+          cat >> arch/arm64/configs/gki_defconfig <<EOF
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
+
+      - name: Build Image
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel"
+          export PATH="$CLANG_DIR:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+          export LLVM_IAS=1
+          make O=out gki_defconfig
+          # verify KPM enabled
+          grep -E "CONFIG_KPM|CONFIG_KSU=" out/.config || true
+          make O=out -j$(nproc) Image 2>&1 | tee build.log
+          ls -l out/arch/arm64/boot/Image
+
+      - name: Package AnyKernel3
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+          sed -i 's/do.devicecheck=.*/do.devicecheck=0/' AnyKernel3/anykernel.sh
+          sed -i 's/block=.*/block=boot/' AnyKernel3/anykernel.sh
+          cd AnyKernel3
+          zip -r9 "$GITHUB_WORKSPACE/GT3-SukiSU-KPM.zip" * -x "*.git*"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT3-SukiSU-KPM
+          path: GT3-SukiSU-KPM.zip
+
+      - name: Create release
+        if: ${{ github.event.inputs.make_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gt3-kpm-${{ github.run_number }}
+          name: realme GT3 SukiSU+KPM kernel
+          files: GT3-SukiSU-KPM.zip
