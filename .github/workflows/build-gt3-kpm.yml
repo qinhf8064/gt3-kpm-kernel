@@ -114,6 +114,29 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_SU=y
           EOF
 
+      - name: Fix missing vendor Kconfig references
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel"
+          # realme open-source tree references oplus private Kconfig files
+          # (e.g. kernel/oplus_cpu/sched/Kconfig) that are not published.
+          # Create empty placeholders for any missing 'source' targets so
+          # gki_defconfig can parse. Iterate until no missing refs remain.
+          for pass in 1 2 3 4 5; do
+            missing=$(grep -rhoE 'source[[:space:]]+"[^"]+"' --include=Kconfig* . 2>/dev/null \
+              | sed -E 's/source[[:space:]]+"([^"]+)"/\1/' | sort -u | while read f; do
+                [ -f "$f" ] || echo "$f"
+              done)
+            [ -z "$missing" ] && break
+            echo "$missing" | while read f; do
+              [ -n "$f" ] && mkdir -p "$(dirname "$f")" && touch "$f" && echo "placeholder: $f"
+            done
+          done
+          echo "=== remaining missing (should be none) ==="
+          grep -rhoE 'source[[:space:]]+"[^"]+"' --include=Kconfig* . 2>/dev/null \
+            | sed -E 's/source[[:space:]]+"([^"]+)"/\1/' | sort -u | while read f; do
+              [ -f "$f" ] || echo "STILL MISSING: $f"
+            done
+
       - name: Build Image
         run: |
           cd "$GITHUB_WORKSPACE/kernel"
