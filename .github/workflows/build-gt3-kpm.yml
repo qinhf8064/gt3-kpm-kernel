@@ -1,31 +1,24 @@
-name: Build realme GT3 Kernel with SukiSU + KPM
+name: Build realme GT3 Kernel SukiSU+KPM (repo manifest)
 
-# Cloud-build realme GT3 (RMX3708, sm8550) GKI android12-5.10 kernel with
-# SukiSU Ultra + SUSFS + CONFIG_KPM=y, so `ksud kpm load` works on-device.
+# Cloud-build realme GT3 / GT neo5 (sm8550 waipio) GKI android12-5.10 kernel
+# with SukiSU Ultra + SUSFS + CONFIG_KPM=y.
+# Based on Quantom2/Realme-GT3-neo5-kernels proven build flow (repo manifest
+# + oplus_build_kernel.sh), which syncs the FULL kernel_platform incl. oplus
+# private modules (single git clone of open-source repo is incomplete).
 #
-# How to use:
-#   1. Create a new GitHub repo (or fork any repo), push this file to
-#      .github/workflows/build-gt3-kpm.yml
-#   2. Actions tab -> "Build realme GT3 Kernel with SukiSU + KPM" -> Run workflow
-#   3. Download the AK3 zip artifact, flash on device (backup boot first!)
-#
-# No local toolchain / source download needed; GitHub runners do the work.
+# Usage: push to .github/workflows/, Actions -> Run workflow -> download zip.
 
 on:
   workflow_dispatch:
     inputs:
       sukisu_ref:
-        description: 'SukiSU commit/tag (empty = latest tag)'
+        description: 'SukiSU ref (susfs-main / latest / commit)'
         required: false
-        default: ''
+        default: 'susfs-main'
       susfs_branch:
         description: 'susfs4ksu branch'
         required: false
         default: 'gki-android12-5.10'
-      make_release:
-        description: 'Create a release with the zip'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -33,159 +26,128 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    env:
-      KERNEL_REPO: realme-kernel-opensource/realme_GTneo5_GTneo5-240W_GT3-240W-AndroidB-kernel-source
-      KERNEL_BRANCH: master
-      ARCH: arm64
-      SUBARCH: arm64
+    timeout-minutes: 180
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h
 
-      - name: Install build deps
+      - name: Install deps + repo tool
         run: |
           sudo apt-get update
           sudo apt-get install -y git curl bc bison flex libssl-dev libelf-dev \
-            python3 make cpio unzip zip rsync ccache binutils-aarch64-linux-gnu \
-            gcc-aarch64-linux-gnu libncurses-dev
-
-      - name: Setup clang (AOSP r416183b ~ LLVM12, matches device kernel)
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/toolchains"
-          cd "$GITHUB_WORKSPACE/toolchains"
-          # LineageOS mirror of AOSP kernel clang r416183b (LLVM 12.0.5),
-          # the exact toolchain the device kernel was built with.
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
-            clang-r416183b
-          "$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin/clang" --version | head -1
-          echo "CLANG_DIR=$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin" >> $GITHUB_ENV
-
-      - name: Clone kernel source
-        run: |
-          git clone --depth=1 -b "$KERNEL_BRANCH" \
-            "https://github.com/$KERNEL_REPO" "$GITHUB_WORKSPACE/kernel"
-
-      - name: Integrate SukiSU + enable KPM
-        run: |
-          cd "$GITHUB_WORKSPACE/kernel"
-          # SukiSU official setup (clones SukiSU, symlinks drivers/kernelsu,
-          # patches drivers/Makefile + Kconfig)
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.sukisu_ref }}" || \
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" | bash
-          # Enable KSU + KPM + KALLSYMS in gki_defconfig
-          cat >> arch/arm64/configs/gki_defconfig <<EOF
-          CONFIG_KSU=y
-          CONFIG_KPM=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          CONFIG_MODULES=y
-          EOF
-          echo "=== gki_defconfig tail ==="; tail -8 arch/arm64/configs/gki_defconfig
-
-      - name: Integrate SUSFS
-        run: |
-          cd "$GITHUB_WORKSPACE/kernel"
-          git clone --depth=1 -b "${{ github.event.inputs.susfs_branch }}" \
-            https://gitlab.com/simonpunk/susfs4ksu susfs || \
-          git clone --depth=1 https://github.com/sidex15/susfs4ksu susfs
-          # apply susfs kernel patches for android12-5.10
-          if [ -d susfs/kernel_patches ]; then
-            for p in susfs/kernel_patches/*.patch; do
-              [ -f "$p" ] && patch -p1 < "$p" || true
-            done
-            cp susfs/kernel_patches/fs/susfs.c fs/susfs.c 2>/dev/null || true
-            cp susfs/kernel_patches/include/linux/susfs.h include/linux/susfs.h 2>/dev/null || true
+            python3 python3-pip make cpio unzip zip rsync ccache repo \
+            binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu libncurses-dev \
+            lz4 zstd device-tree-compiler
+          if ! command -v repo >/dev/null; then
+            curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+            chmod a+x ~/repo; sudo mv ~/repo /usr/local/bin/repo
           fi
-          cat >> arch/arm64/configs/gki_defconfig <<EOF
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
-          EOF
 
-      - name: Fix missing vendor Kconfig references
+      - name: Sync kernel_platform (full, via manifest)
         run: |
-          cd "$GITHUB_WORKSPACE/kernel"
-          # realme open-source tree references oplus private Kconfig files
-          # not published. Create empty placeholders for missing 'source'
-          # targets so gki_defconfig parses. Skip Make-variable refs like
-          # $(SRCARCH). Tolerate existing dirs/files.
-          python3 - <<'PY'
-          import os, re, glob
-          pat = re.compile(r'source\s+"([^"]+)"')
-          created = 0
-          for _ in range(6):
-              missing = set()
-              for kf in glob.glob('**/Kconfig*', recursive=True):
-                  try:
-                      txt = open(kf, encoding='utf-8', errors='ignore').read()
-                  except Exception:
-                      continue
-                  for m in pat.findall(txt):
-                      if '$(' in m or '${' in m:   # skip make variables
-                          continue
-                      if not os.path.isfile(m):
-                          missing.add(m)
-              if not missing:
-                  break
-              for f in sorted(missing):
-                  d = os.path.dirname(f)
-                  try:
-                      if d and not os.path.isdir(d):
-                          os.makedirs(d, exist_ok=True)
-                      open(f, 'a').close()
-                      created += 1
-                      print('placeholder:', f)
-                  except Exception as e:
-                      print('skip', f, repr(e))
-          print('total placeholders created:', created)
-          PY
+          mkdir -p ~/kernel_platform && cd ~/kernel_platform
+          repo init -u https://github.com/Quantom2/gt_neo5_kernel_manifest.git \
+            -b oneplus/sm8475 -m realme_gt_neo5.xml --depth=1 --no-tags
+          ok=0
+          for i in 1 2 3; do
+            if repo sync -c --no-clone-bundle --no-tags --optimized-fetch -j$(nproc); then ok=1; break; fi
+            echo "repo sync attempt $i failed; retry"; sleep 5
+          done
+          [ "$ok" = 1 ] || { echo "::error::repo sync failed"; exit 1; }
+          ls ~/kernel_platform
 
-      - name: Build Image
+      - name: Integrate SukiSU Ultra
         run: |
-          cd "$GITHUB_WORKSPACE/kernel"
-          export PATH="$CLANG_DIR:$PATH"
-          export ARCH=arm64 SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-          export LLVM_IAS=1
-          make O=out gki_defconfig
-          # verify KPM enabled
-          grep -E "CONFIG_KPM|CONFIG_KSU=" out/.config || true
-          make O=out -j$(nproc) Image 2>&1 | tee build.log
-          ls -l out/arch/arm64/boot/Image
+          cd ~/kernel_platform
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.sukisu_ref }}"
+          if [ -d KernelSU/kernel ]; then
+            cd KernelSU/kernel
+            BASE=10606
+            V=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 0) + $BASE)
+            sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${V}/" Makefile || true
+            cd ~/kernel_platform
+          fi
+
+      - name: Apply SUSFS patches
+        run: |
+          cd ~/kernel_platform
+          git clone https://github.com/WildPlusKernel/kernel_patches.git --depth=1 --no-tags || \
+          git clone https://github.com/WildKernels/kernel_patches.git --depth=1 --no-tags
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch }}" --depth=1 --no-tags || \
+          git clone https://github.com/sidex15/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch }}" --depth=1 --no-tags
+          cp -r susfs4ksu/kernel_patches/fs/* common/fs/ 2>/dev/null || true
+          cp -r susfs4ksu/kernel_patches/include/* common/include/ 2>/dev/null || true
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch common/ 2>/dev/null || true
+          cp kernel_patches/69_hide_stuff.patch common/ 2>/dev/null || true
+          cd common
+          patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch || echo "susfs patch skip"
+          patch -p1 --fuzz=3 -F3 < 69_hide_stuff.patch || echo "hide patch skip"
+
+      - name: Configure KSU + SUSFS + KPM
+        run: |
+          cd ~/kernel_platform
+          CFG=./common/arch/arm64/configs/gki_defconfig
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPM=y"
+            echo "CONFIG_KALLSYMS=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n"
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n"
+            echo "CONFIG_MODULE_SIG=n"
+          } >> "$CFG"
+          sed -i 's/check_defconfig//' ./common/build.config.gki || true
+          rm -f common/android/gki_aarch64_modules; touch common/android/gki_aarch64_modules
+          echo "=== KPM in defconfig ==="; grep -E "CONFIG_KPM|CONFIG_KSU=" "$CFG"
+
+      - name: Prepare oplus build script
+        run: |
+          cd ~/kernel_platform/oplus/build/
+          sed -i '/init_environment/s/ \$1 \$2/ \$1 \$2 \$3 \$4 \$5/' oplus_build_kernel.sh || true
+          sed -i '/oplus_setup.sh/s/ \$1 \$2/ \$1 \$2 \$3 \$4 \$5/' oplus_build_kernel.sh || true
+
+      - name: Build kernel Image
+        run: |
+          cd ~
+          SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh wapio gki thin all disable 2>&1 | tee build.log
+          echo "=== find Image ==="
+          find ~/kernel_platform/out -name Image 2>/dev/null | head
+          IMG=$(find ~/kernel_platform/out -path "*gki_kernel/dist/Image" 2>/dev/null | head -1)
+          [ -z "$IMG" ] && IMG=$(find ~/kernel_platform/out -name Image 2>/dev/null | head -1)
+          echo "IMG=$IMG"; ls -l "$IMG"
+          echo "IMAGE_PATH=$IMG" >> $GITHUB_ENV
 
       - name: Package AnyKernel3
         run: |
-          cd "$GITHUB_WORKSPACE"
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
-          sed -i 's/do.devicecheck=.*/do.devicecheck=0/' AnyKernel3/anykernel.sh
-          sed -i 's/block=.*/block=boot/' AnyKernel3/anykernel.sh
+          cd ~
+          git clone https://github.com/WildPlusKernel/AnyKernel3.git -b gki-2.0 --depth=1 --no-tags || \
+          git clone https://github.com/osm0sis/AnyKernel3.git --depth=1
+          cp "$IMAGE_PATH" AnyKernel3/Image
+          sed -i 's/do.devicecheck=.*/do.devicecheck=0/' AnyKernel3/anykernel.sh || true
           cd AnyKernel3
-          zip -r9 "$GITHUB_WORKSPACE/GT3-SukiSU-KPM.zip" * -x "*.git*"
+          zip -r9 ~/GT3-SukiSU-KPM.zip ./* -x "*.git*"
+          ls -l ~/GT3-SukiSU-KPM.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: GT3-SukiSU-KPM
-          path: GT3-SukiSU-KPM.zip
-
-      - name: Create release
-        if: ${{ github.event.inputs.make_release == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: gt3-kpm-${{ github.run_number }}
-          name: realme GT3 SukiSU+KPM kernel
-          files: GT3-SukiSU-KPM.zip
+          path: ~/GT3-SukiSU-KPM.zip
