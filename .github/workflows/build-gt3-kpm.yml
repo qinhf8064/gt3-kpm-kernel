@@ -141,14 +141,14 @@ jobs:
                   break
               for f in sorted(missing):
                   d = os.path.dirname(f)
-                  if d and not os.path.isdir(d):
-                      os.makedirs(d, exist_ok=True)
                   try:
+                      if d and not os.path.isdir(d):
+                          os.makedirs(d, exist_ok=True)
                       open(f, 'a').close()
                       created += 1
                       print('placeholder:', f)
                   except Exception as e:
-                      print('skip', f, e)
+                      print('skip', f, repr(e))
           print('total placeholders created:', created)
           PY
 
