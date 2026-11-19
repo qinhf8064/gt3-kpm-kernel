@@ -52,14 +52,13 @@ jobs:
 
       - name: Setup clang (AOSP r416183b ~ LLVM12, matches device kernel)
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/toolchains/clang-r416183b"
+          mkdir -p "$GITHUB_WORKSPACE/toolchains"
           cd "$GITHUB_WORKSPACE/toolchains"
-          # Direct tarball of AOSP clang r416183b (LLVM 12.0.5), the exact
-          # toolchain the device kernel was built with (per /proc/version).
-          curl -L --retry 3 -o clang.tar.gz \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r416183b.tar.gz"
-          tar xzf clang.tar.gz -C clang-r416183b
-          rm clang.tar.gz
+          # LineageOS mirror of AOSP kernel clang r416183b (LLVM 12.0.5),
+          # the exact toolchain the device kernel was built with.
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b \
+            clang-r416183b
           "$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin/clang" --version | head -1
           echo "CLANG_DIR=$GITHUB_WORKSPACE/toolchains/clang-r416183b/bin" >> $GITHUB_ENV
 
